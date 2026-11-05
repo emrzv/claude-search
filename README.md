@@ -14,9 +14,11 @@ JpsProjectImportPerformanceTests flaky failures since September  65 hits · 2026
 
 Each result shows the chat title, project directory, git branch, last activity time, highlighted snippets, and the command to resume it.
 
+Run it **without search terms** to get a switcher: all your chats across projects, most recent first, in fzf with a preview of the first and last prompt. Press Enter to resume the selected chat in its project directory.
+
 ## Install
 
-Requires Python 3.9+. [fzf](https://github.com/junegunn/fzf) is optional (for `-i`).
+Requires Python 3.9+. [fzf](https://github.com/junegunn/fzf) is optional, for the switcher and `-i` (without it, `claude-search` prints the list).
 
 ```sh
 curl -o ~/.local/bin/claude-search https://raw.githubusercontent.com/emrzv/claude-search/main/claude-search
@@ -26,6 +28,8 @@ chmod +x ~/.local/bin/claude-search
 ## Usage
 
 ```sh
+claude-search                      # switcher: pick a recent chat and resume it
+claude-search --print -p myapp     # list recent chats in myapp instead of opening fzf
 claude-search foo bar              # chats containing both "foo" and "bar" (anywhere in the chat)
 claude-search "foo bar"            # exact phrase
 claude-search -e 'PROJ-\d+'        # regular expression
@@ -47,6 +51,7 @@ By default only your prompts, Claude's replies and chat titles are searched; mat
 | `--sort hits` | most matches first (default: most recent) |
 | `-l N` | show at most N chats |
 | `-w N` | characters of context around each match |
+| `--print` | without terms: print the list instead of opening fzf |
 | `--no-pager` | don't page output |
 
 See `claude-search -h` for the full list.

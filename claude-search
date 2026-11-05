@@ -2,6 +2,7 @@
 """Search local Claude Code sessions across all projects, grouped by chat.
 
 Examples:
+  claude-search                            # switcher: pick a recent chat with fzf and resume it
   claude-search flaky test                 # sessions containing both "flaky" and "test"
   claude-search "flaky test"               # exact phrase
   claude-search -e 'PROJ-\\d+' --since 30d  # regex, last 30 days
@@ -42,6 +43,20 @@ class Style:
 def light_background():
     # COLORFGBG is "fg;bg" (set by iTerm2, Terminal.app, rxvt, Konsole); bg 7 or 15 means a light theme.
     return os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in ("7", "15")
+
+
+def fmt_time(ts):
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def clip_path(p, width):
+    p = short_path(p)
+    return p if len(p) <= width else "…" + p[-(width - 1):]
+
+
+def one_line(text, width=None):
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text if width is None or len(text) <= width else text[:width - 1] + "…"
 
 
 def page(lines):
@@ -139,7 +154,7 @@ def search_file(path, opts, patterns, literals):
     titles = {}
     hits = []  # (timestamp, role, text, match)
     matched = [False] * len(patterns)
-    meta = {"cwd": None, "branch": None, "first_prompt": None, "first_ts": None}
+    meta = {"cwd": None, "branch": None, "first_prompt": None, "last_prompt": None}
     try:
         f = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -153,6 +168,12 @@ def search_file(path, opts, patterns, literals):
                         titles["ai"] = r["aiTitle"]
                     if r.get("customTitle"):
                         titles["custom"] = r["customTitle"]
+                except ValueError:
+                    pass
+                continue
+            if '"type":"last-prompt"' in line:
+                try:
+                    meta["last_prompt"] = json.loads(line).get("lastPrompt") or meta["last_prompt"]
                 except ValueError:
                     pass
                 continue
@@ -170,8 +191,6 @@ def search_file(path, opts, patterns, literals):
                 continue
             if meta["cwd"] is None and rec.get("cwd"):
                 meta["cwd"], meta["branch"] = rec["cwd"], rec.get("gitBranch")
-            if meta["first_ts"] is None and rec.get("timestamp"):
-                meta["first_ts"] = rec["timestamp"]
             for role, text in block_texts(rec, opts):
                 if meta["first_prompt"] is None and role == "you" and text.strip():
                     meta["first_prompt"] = text
@@ -184,7 +203,9 @@ def search_file(path, opts, patterns, literals):
                 if first:  # one hit per block is enough
                     hits.append((rec.get("timestamp", ""), role, text, first))
 
-    title = titles.get("custom") or titles.get("ai") or re.sub(r"\s+", " ", meta["first_prompt"] or "(untitled)")[:80]
+    if not patterns and not titles and meta["first_prompt"] is None:
+        return None  # empty session (e.g. opened and closed, or only slash commands)
+    title = titles.get("custom") or titles.get("ai") or one_line(meta["first_prompt"] or "(untitled)", 80)
     for i, p in enumerate(patterns):
         if not matched[i] and p.search(title):
             matched[i] = True
@@ -200,6 +221,8 @@ def search_file(path, opts, patterns, literals):
         "title": title,
         "cwd": meta["cwd"] or "/" + path.parts[len(PROJECTS.parts)].lstrip("-").replace("-", "/"),
         "branch": meta["branch"],
+        "first_prompt": meta["first_prompt"],
+        "last_prompt": meta["last_prompt"],
         "mtime": last_activity(path),
         "hits": hits,
     }
@@ -207,7 +230,8 @@ def search_file(path, opts, patterns, literals):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("terms", nargs="+", help="search terms; a session must contain all of them (quote for a phrase)")
+    ap.add_argument("terms", nargs="*", help="search terms; a session must contain all of them (quote for a phrase). "
+                                             "Without terms, list recent chats")
     ap.add_argument("-e", "--regex", action="store_true", help="treat terms as regular expressions")
     ap.add_argument("-s", "--case-sensitive", dest="ignore_case", action="store_false")
     ap.add_argument("-t", "--tools", action="store_true", help="also search tool calls and tool output")
@@ -220,11 +244,14 @@ def main():
     ap.add_argument("--sort", choices=["recent", "hits"], default="recent")
     ap.add_argument("-l", "--limit", type=int, default=0, help="max sessions to show")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("-i", "--interactive", action="store_true", help="pick a session with fzf and resume it")
+    ap.add_argument("-i", "--interactive", action="store_true", help="pick a session with fzf and resume it "
+                                                                     "(default when run without terms)")
+    ap.add_argument("--print", dest="print_list", action="store_true", help="without terms: print the list instead of opening fzf")
     ap.add_argument("--no-pager", action="store_true", help="don't page output")
     opts = ap.parse_args()
     if opts.all:
         opts.tools = True
+    recent_mode = not opts.terms
     if opts.no_pager:
         os.environ["CLAUDE_SEARCH_PAGER"] = "cat"
 
@@ -240,7 +267,7 @@ def main():
 
     since = parse_since(opts.since) if opts.since else None
     files = list(PROJECTS.glob("*/*.jsonl"))
-    if opts.subagents:
+    if opts.subagents and not recent_mode:
         files += PROJECTS.glob("*/*/subagents/*.jsonl")
     # Project dirs are the cwd with every non-alphanumeric char replaced by "-".
     proj_key = re.sub(r"[^a-z0-9]", "-", opts.project.lower()) if opts.project else None
@@ -248,6 +275,7 @@ def main():
     results = {}
     for path in files:
         try:
+            # mtime is never earlier than the last record, so it's a safe prefilter
             if since and path.stat().st_mtime < since:
                 continue
         except OSError:
@@ -255,14 +283,14 @@ def main():
         if proj_key and proj_key not in path.parts[len(PROJECTS.parts)].lower():
             continue
         s = search_file(path, opts, patterns, literals)
-        if not s:
+        if not s or (since and s["mtime"] < since):
             continue
         if s["id"] in results:  # merge subagent hits into the parent session
             prev = results[s["id"]]
             prev["hits"] += s["hits"]
             prev["mtime"] = max(prev["mtime"], s["mtime"])
             if prev["subagent"] and not s["subagent"]:
-                prev.update(title=s["title"], cwd=s["cwd"], branch=s["branch"], file=s["file"], subagent=False)
+                prev.update({k: s[k] for k in ("title", "cwd", "branch", "file", "first_prompt", "last_prompt")}, subagent=False)
         else:
             results[s["id"]] = s
 
@@ -273,52 +301,76 @@ def main():
     if opts.json:
         out = [{k: v for k, v in s.items() if k not in ("hits", "mtime")} | {
             "last_active": datetime.fromtimestamp(s["mtime"]).astimezone().isoformat(timespec="seconds"),
-            "hit_count": len(s["hits"]),
             "resume": f"cd {s['cwd']!r} && claude --resume {s['id']}",
+        } | ({} if recent_mode else {
+            "hit_count": len(s["hits"]),
             "snippets": [{"role": r, "timestamp": ts, "text": snippet(t, m, opts.width, Style(False))} for ts, r, t, m in s["hits"][:opts.snippets]],
-        } for s in sessions]
+        }) for s in sessions]
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()
         return
 
-    if opts.interactive:
-        return pick(sessions, opts)
+    interactive = opts.interactive or (recent_mode and not opts.print_list and sys.stdin.isatty()
+                                       and sys.stdout.isatty() and shutil.which("fzf"))
+    if interactive:
+        return pick(sessions, opts, recent_mode)
 
     st = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+    paging = sys.stdout.isatty()
     lines = []
-    for s in sessions:
-        when = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
-        n = len(s["hits"])
-        lines.append(f"{st.title(s['title'])}  {st.dim(f'{n} hit' + ('s' if n != 1 else '') + f' · {when}')}")
-        branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
-        lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
-        for ts, role, text, m in s["hits"][:opts.snippets]:
-            label = getattr(st, role, st.dim)(f"{role:>8}")
-            lines.append(f"  {label} {snippet(text, m, opts.width, st)}")
-        if n > opts.snippets > 0:
-            lines.append(st.dim(f"           … {n - opts.snippets} more"))
-        lines.append(st.dim(f"  ↳ cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
-        lines.append("")
-    summary = f"{len(sessions)} session(s), {sum(len(s['hits']) for s in sessions)} hit(s)"
-    if sys.stdout.isatty():
+    if recent_mode:
+        pw = min(40, max((len(short_path(s["cwd"])) for s in sessions), default=0))
+        for s in sessions:
+            lines.append(f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  "
+                         f"{st.title(s['title'])}  {st.dim(s['id'])}")
+        summary = f"{len(sessions)} session(s)"
+    else:
+        for s in sessions:
+            n = len(s["hits"])
+            info = f"{n} hit{'s' if n != 1 else ''} · {fmt_time(s['mtime'])}"
+            lines.append(f"{st.title(s['title'])}  {st.dim(info)}")
+            branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
+            lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
+            for ts, role, text, m in s["hits"][:opts.snippets]:
+                label = getattr(st, role, st.dim)(f"{role:>8}")
+                lines.append(f"  {label} {snippet(text, m, opts.width, st)}")
+            if n > opts.snippets > 0:
+                lines.append(st.dim(f"           … {n - opts.snippets} more"))
+            lines.append(st.dim(f"  ↳ cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
+            lines.append("")
+        summary = f"{len(sessions)} session(s), {sum(len(s['hits']) for s in sessions)} hit(s)"
+    if paging:
         page([st.dim(summary), ""] + lines)
     else:
         print("\n".join(lines))
         print(summary, file=sys.stderr)
 
 
-def pick(sessions, opts):
+def pick(sessions, opts, recent_mode):
     if not sessions:
         sys.exit("no matches")
     if not shutil.which("fzf"):
-        sys.exit("fzf not found; install it or drop -i")
+        sys.exit("fzf not found; install it or use --print")
+    st = Style(not os.environ.get("NO_COLOR"))
+    plain = Style(False)
+    pw = min(32, max((len(short_path(s["cwd"])) for s in sessions), default=0))
     lines = []
     for idx, s in enumerate(sessions):
-        when = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
-        preview = "\n".join(f"[{r}] {snippet(t, m, opts.width, Style(False))}" for _, r, t, m in s["hits"][:20])
-        lines.append(f"{idx}\t{when}  {s['title']}  —  {short_path(s['cwd'])}  ({len(s['hits'])})\t{preview.replace(chr(10), chr(31))}")
-    cmd = ["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--preview-window", "down,60%,wrap",
-           "--preview", "echo {3} | tr '\\037' '\\n'"]
+        branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
+        preview = [s["title"], short_path(s["cwd"]) + branch, f"last active {fmt_time(s['mtime'])}", ""]
+        if recent_mode:
+            preview += ["First prompt:", one_line(s["first_prompt"], 600), ""]
+            if s["last_prompt"] and one_line(s["last_prompt"]) != one_line(s["first_prompt"]):
+                preview += ["Last prompt:", one_line(s["last_prompt"], 600), ""]
+        else:
+            preview += [f"[{r}] {snippet(t, m, opts.width, plain)}" for _, r, t, m in s["hits"][:20]] + [""]
+        preview.append(f"cd {short_path(s['cwd'])} && claude --resume {s['id']}")
+        hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
+        row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {s['title']}{hits}"
+        lines.append(f"{idx}\t{row}\t{chr(31).join(preview).replace(chr(9), ' ').replace(chr(10), ' ')}")
+    cmd = ["fzf", "--ansi", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
+           "--prompt", "chat> " if recent_mode else "match> ",
+           "--preview-window", "right,45%,wrap,<120(down,40%,wrap)", "--preview", "printf '%s' {3} | tr '\\037' '\\n'"]
     if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
         cmd += ["--color", "light"]
     res = subprocess.run(cmd, input="\n".join(lines), stdout=subprocess.PIPE, text=True)
