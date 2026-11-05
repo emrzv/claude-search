@@ -50,6 +50,14 @@ By default only your prompts, Claude's replies and chat titles are searched; mat
 
 See `claude-search -h` for the full list.
 
+## Colors
+
+The default colors work on both light and dark terminals. fzf is started with `--color light` when the terminal reports a light background via `COLORFGBG` (unless `FZF_DEFAULT_OPTS` sets colors). To customize, set any of these keys to an SGR code; `NO_COLOR` disables colors:
+
+```sh
+export CLAUDE_SEARCH_COLORS="hl=1;31:title=1:path=32:you=35:claude=2:dim=2"
+```
+
 ## How it works
 
 Claude Code stores each session as a JSONL file under `~/.claude/projects/<project>/<session-id>.jsonl` (or `$CLAUDE_CONFIG_DIR/projects`). `claude-search` scans these files, prefiltering raw lines before parsing JSON, so a few hundred MB of history takes about a second. Titles come from `/rename`, Claude's auto-generated title, or the first prompt.

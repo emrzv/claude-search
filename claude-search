@@ -23,11 +23,25 @@ PROJECTS = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / 
 HOME = str(Path.home())
 
 
+# Readable on both light and dark backgrounds: no yellow/cyan (invisible on white) or blue (invisible on black).
+# Override with e.g. CLAUDE_SEARCH_COLORS="hl=1;31:title=1:path=32:you=35:claude=2:dim=2"
+COLORS = {"hl": "1;31", "title": "1", "path": "32", "you": "35", "claude": "2", "dim": "2"}
+
+
 class Style:
     def __init__(self, on):
-        c = (lambda code: (lambda s: f"\033[{code}m{s}\033[0m")) if on else (lambda code: (lambda s: s))
-        self.bold, self.dim, self.hl = c("1"), c("2"), c("1;33")
-        self.title, self.path, self.you, self.ai = c("1;36"), c("32"), c("35"), c("34")
+        codes = dict(COLORS)
+        for item in os.environ.get("CLAUDE_SEARCH_COLORS", "").split(":"):
+            k, _, v = item.partition("=")
+            if k in codes:
+                codes[k] = v
+        for k, code in codes.items():
+            setattr(self, k, (lambda s, code=code: f"\033[{code}m{s}\033[0m" if s else s) if on and code else (lambda s: s))
+
+
+def light_background():
+    # COLORFGBG is "fg;bg" (set by iTerm2, Terminal.app, rxvt, Konsole); bg 7 or 15 means a light theme.
+    return os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in ("7", "15")
 
 
 def parse_since(s):
@@ -242,7 +256,6 @@ def main():
         return pick(sessions, opts)
 
     st = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
-    role_style = {"you": st.you, "claude": st.ai}
     for s in sessions:
         when = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
         n = len(s["hits"])
@@ -250,7 +263,7 @@ def main():
         branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
         print(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
         for ts, role, text, m in s["hits"][:opts.snippets]:
-            label = role_style.get(role, st.dim)(f"{role:>8}")
+            label = getattr(st, role, st.dim)(f"{role:>8}")
             print(f"  {label} {snippet(text, m, opts.width, st)}")
         if n > opts.snippets > 0:
             print(st.dim(f"           … {n - opts.snippets} more"))
@@ -270,10 +283,11 @@ def pick(sessions, opts):
         when = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
         preview = "\n".join(f"[{r}] {snippet(t, m, opts.width, Style(False))}" for _, r, t, m in s["hits"][:20])
         lines.append(f"{idx}\t{when}  {s['title']}  —  {short_path(s['cwd'])}  ({len(s['hits'])})\t{preview.replace(chr(10), chr(31))}")
-    res = subprocess.run(
-        ["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--preview-window", "down,60%,wrap",
-         "--preview", "echo {3} | tr '\\037' '\\n'"],
-        input="\n".join(lines), capture_output=False, stdout=subprocess.PIPE, text=True)
+    cmd = ["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--preview-window", "down,60%,wrap",
+           "--preview", "echo {3} | tr '\\037' '\\n'"]
+    if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
+        cmd += ["--color", "light"]
+    res = subprocess.run(cmd, input="\n".join(lines), stdout=subprocess.PIPE, text=True)
     if res.returncode != 0 or not res.stdout.strip():
         return
     s = sessions[int(res.stdout.split("\t", 1)[0])]
