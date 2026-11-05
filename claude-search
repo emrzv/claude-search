@@ -15,9 +15,11 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -128,12 +130,28 @@ def block_texts(rec, opts):
             yield "result", c or ""
 
 
-def snippet(text, m, width, st):
+def highlight(text, patterns, st):
+    """Highlight every match of any pattern; overlapping matches are merged."""
+    spans = sorted(m.span() for p in patterns for m in p.finditer(text) if m.end() > m.start())
+    out, pos = [], 0
+    for a, b in spans:
+        if b <= pos:
+            continue
+        a = max(a, pos)
+        out += [text[pos:a], st.hl(text[a:b])]
+        pos = b
+    return "".join(out) + text[pos:]
+
+
+def snippet(text, m, width, st, patterns=()):
     a, b = m.span()
-    pre = re.sub(r"\s+", " ", text[max(0, a - width):a]).lstrip()
-    post = re.sub(r"\s+", " ", text[b:b + width]).rstrip()
     lead = "…" if a - width > 0 else ""
     tail = "…" if b + width < len(text) else ""
+    window = one_line(text[max(0, a - width):b + width])
+    if any(p.search(window) for p in patterns):  # may not, e.g. a regex spanning collapsed whitespace
+        return f"{lead}{highlight(window, patterns, st)}{tail}"
+    pre = re.sub(r"\s+", " ", text[max(0, a - width):a]).lstrip()
+    post = re.sub(r"\s+", " ", text[b:b + width]).rstrip()
     return f"{lead}{pre}{st.hl(re.sub(r'\s+', ' ', m.group()))}{post}{tail}"
 
 
@@ -262,6 +280,7 @@ def main():
         patterns = [re.compile(s, flags) for s in srcs]
     except re.error as e:
         sys.exit(f"bad regex: {e}")
+    opts.patterns = patterns
     literals = None
     if not opts.regex and all(t.isprintable() and '"' not in t and "\\" not in t for t in opts.terms):
         literals = [t.lower() if opts.ignore_case else t for t in opts.terms]
@@ -332,7 +351,7 @@ def main():
             lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
             for ts, role, text, m in s["hits"][:opts.snippets]:
                 label = getattr(st, role, st.dim)(f"{role:>8}")
-                lines.append(f"  {label} {snippet(text, m, opts.width, st)}")
+                lines.append(f"  {label} {snippet(text, m, opts.width, st, opts.patterns)}")
             if n > opts.snippets > 0:
                 lines.append(st.dim(f"           … {n - opts.snippets} more"))
             lines.append(st.dim(f"  ↳ cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
@@ -351,28 +370,38 @@ def pick(sessions, opts, recent_mode):
     if not shutil.which("fzf"):
         sys.exit("fzf not found; install it or use --print")
     st = Style(not os.environ.get("NO_COLOR"))
-    plain = Style(False)
     pw = min(32, max((len(short_path(s["cwd"])) for s in sessions), default=0))
-    lines = []
-    for idx, s in enumerate(sessions):
-        branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
-        preview = [s["title"], short_path(s["cwd"]) + branch, f"last active {fmt_time(s['mtime'])}", ""]
-        if recent_mode:
-            preview += ["First prompt:", one_line(s["first_prompt"], 600), ""]
-            if s["last_prompt"] and one_line(s["last_prompt"]) != one_line(s["first_prompt"]):
-                preview += ["Last prompt:", one_line(s["last_prompt"], 600), ""]
-        else:
-            preview += [f"[{r}] {snippet(t, m, opts.width, plain)}" for _, r, t, m in s["hits"][:20]] + [""]
-        preview.append(f"cd {short_path(s['cwd'])} && claude --resume {s['id']}")
-        hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
-        row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {s['title']}{hits}"
-        lines.append(f"{idx}\t{row}\t{chr(31).join(preview).replace(chr(9), ' ').replace(chr(10), ' ')}")
-    cmd = ["fzf", "--ansi", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
-           "--prompt", "chat> " if recent_mode else "match> ",
-           "--preview-window", "right,45%,wrap,<120(down,40%,wrap)", "--preview", "printf '%s' {3} | tr '\\037' '\\n'"]
-    if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
-        cmd += ["--color", "light"]
-    res = subprocess.run(cmd, input="\n".join(lines), stdout=subprocess.PIPE, text=True)
+    # Previews go to files: fzf strips ANSI colors from fields, and this keeps the input lines small.
+    tmp = tempfile.mkdtemp(prefix="claude-search-")
+    try:
+        lines = []
+        for idx, s in enumerate(sessions):
+            branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
+            preview = [st.title(s["title"]), st.path(short_path(s["cwd"])) + st.dim(branch),
+                       st.dim(f"last active {fmt_time(s['mtime'])}"), ""]
+            if recent_mode:
+                preview += [st.you("First prompt:"), one_line(s["first_prompt"], 600), ""]
+                if s["last_prompt"] and one_line(s["last_prompt"]) != one_line(s["first_prompt"]):
+                    preview += [st.you("Last prompt:"), one_line(s["last_prompt"], 600), ""]
+            else:
+                for _, role, text, m in s["hits"][:50]:
+                    label = getattr(st, role, st.dim)(f"{role}:")
+                    preview += [f"{label} {snippet(text, m, opts.width * 2, st, opts.patterns)}", ""]
+                if len(s["hits"]) > 50:
+                    preview += [st.dim(f"… {len(s['hits']) - 50} more"), ""]
+            preview.append(st.dim(f"cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
+            Path(tmp, str(idx)).write_text("\n".join(preview) + "\n", encoding="utf-8")
+            hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
+            row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {s['title']}{hits}"
+            lines.append(f"{idx}\t{row}")
+        cmd = ["fzf", "--ansi", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
+               "--prompt", "chat> " if recent_mode else "match> ",
+               "--preview-window", "right,45%,wrap,<120(down,40%,wrap)", "--preview", f"cat {shlex.quote(tmp)}/{{1}}"]
+        if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
+            cmd += ["--color", "light"]
+        res = subprocess.run(cmd, input="\n".join(lines), stdout=subprocess.PIPE, text=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     if res.returncode != 0 or not res.stdout.strip():
         return
     s = sessions[int(res.stdout.split("\t", 1)[0])]
