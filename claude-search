@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -371,7 +372,10 @@ def pick(sessions, opts, recent_mode):
         sys.exit("fzf not found; install it or use --print")
     st = Style(not os.environ.get("NO_COLOR"))
     pw = min(32, max((len(short_path(s["cwd"])) for s in sessions), default=0))
-    # Previews go to files: fzf strips ANSI colors from fields, and this keeps the input lines small.
+    # Make kill / closing the terminal unwind through `finally`, so the preview dir is removed.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
+    # Previews go to files so they can be colored, and the input lines stay small.
     tmp = tempfile.mkdtemp(prefix="claude-search-")
     try:
         lines = []
