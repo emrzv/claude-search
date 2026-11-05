@@ -64,6 +64,17 @@ def one_line(text, width=None):
     return text if width is None or len(text) <= width else text[:width - 1] + "…"
 
 
+MAX_PATH_WIDTH = 50  # project column; longer paths keep their tail ("…/project")
+MIN_TITLE_WIDTH = 25
+WIDE_TERMINAL = 160  # below this the picker preview goes under the list, so the list gets the full width
+
+
+def path_width(sessions, available):
+    """Width of the project column: fit the longest path, within what the line has room for."""
+    longest = max((len(short_path(s["cwd"])) for s in sessions), default=0)
+    return min(longest, MAX_PATH_WIDTH, max(24, available - 18 - MIN_TITLE_WIDTH))  # 18 = timestamp + gaps
+
+
 def page(lines):
     """Show output through a pager (like git) when writing to a terminal."""
     if not sys.stdout.isatty():
@@ -338,7 +349,7 @@ def main():
     paging = sys.stdout.isatty()
     lines = []
     if recent_mode:
-        pw = min(40, max((len(short_path(s["cwd"])) for s in sessions), default=0))
+        pw = path_width(sessions, shutil.get_terminal_size().columns)
         for s in sessions:
             lines.append(f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  "
                          f"{st.title(s['title'])}  {st.dim(s['id'])}")
@@ -371,7 +382,9 @@ def pick(sessions, opts, recent_mode):
     if not shutil.which("fzf"):
         sys.exit("fzf not found; install it or use --print")
     st = Style(not os.environ.get("NO_COLOR"))
-    pw = min(32, max((len(short_path(s["cwd"])) for s in sessions), default=0))
+    cols = shutil.get_terminal_size().columns
+    list_width = cols * 55 // 100 if cols >= WIDE_TERMINAL else cols
+    pw = path_width(sessions, list_width - 3 - (0 if recent_mode else 6))  # fzf pointer/margin, "(hits)"
     # Make kill / closing the terminal unwind through `finally`, so the preview dir is removed.
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
@@ -398,9 +411,14 @@ def pick(sessions, opts, recent_mode):
             hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
             row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {s['title']}{hits}"
             lines.append(f"{idx}\t{row}")
+        n = len(sessions)
+        what = "recent chats" if recent_mode else \
+            f"{n} chat{'s' if n != 1 else ''} matching " + " ".join(shlex.quote(t) for t in opts.terms)
+        header = f"{what} · type to filter · Enter: resume · Esc: quit"
         cmd = ["fzf", "--ansi", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
-               "--prompt", "chat> " if recent_mode else "match> ",
-               "--preview-window", "right,45%,wrap,<120(down,40%,wrap)", "--preview", f"cat {shlex.quote(tmp)}/{{1}}"]
+               "--prompt", "Filter: ", "--header", header,
+               "--preview-window", f"right,45%,wrap,<{WIDE_TERMINAL}(down,40%,wrap)",
+               "--preview", f"cat {shlex.quote(tmp)}/{{1}}"]
         if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
             cmd += ["--color", "light"]
         res = subprocess.run(cmd, input="\n".join(lines), stdout=subprocess.PIPE, text=True)
