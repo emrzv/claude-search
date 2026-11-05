@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Search local Claude Code sessions across all projects, grouped by chat.
 
+In a terminal, results open in an fzf picker (arrows + Enter resumes the chat); --print prints them instead.
+
 Examples:
-  claude-search                            # switcher: pick a recent chat with fzf and resume it
+  claude-search                            # switcher: pick a recent chat and resume it
   claude-search flaky test                 # sessions containing both "flaky" and "test"
   claude-search "flaky test"               # exact phrase
   claude-search -e 'PROJ-\\d+' --since 30d  # regex, last 30 days
   claude-search -t gradle -p myapp         # include tool calls/results, only projects matching "myapp"
-  claude-search -i docker                  # pick a result with fzf and resume it
+  claude-search --print docker             # print grouped results with snippets instead of the picker
 """
 import argparse
 import json
@@ -244,9 +246,8 @@ def main():
     ap.add_argument("--sort", choices=["recent", "hits"], default="recent")
     ap.add_argument("-l", "--limit", type=int, default=0, help="max sessions to show")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("-i", "--interactive", action="store_true", help="pick a session with fzf and resume it "
-                                                                     "(default when run without terms)")
-    ap.add_argument("--print", dest="print_list", action="store_true", help="without terms: print the list instead of opening fzf")
+    ap.add_argument("--print", dest="print_list", action="store_true", help="print results instead of opening the fzf picker")
+    ap.add_argument("-i", "--interactive", action="store_true", help=argparse.SUPPRESS)  # old flag; the picker is now the default
     ap.add_argument("--no-pager", action="store_true", help="don't page output")
     opts = ap.parse_args()
     if opts.all:
@@ -310,9 +311,7 @@ def main():
         print()
         return
 
-    interactive = opts.interactive or (recent_mode and not opts.print_list and sys.stdin.isatty()
-                                       and sys.stdout.isatty() and shutil.which("fzf"))
-    if interactive:
+    if not opts.print_list and sys.stdin.isatty() and sys.stdout.isatty() and shutil.which("fzf"):
         return pick(sessions, opts, recent_mode)
 
     st = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))

@@ -2,8 +2,10 @@
 
 Search your local [Claude Code](https://claude.com/claude-code) sessions across **all projects** at once, with results grouped by chat. Handy when you remember a conversation but not which project you had it in.
 
+In a terminal, results open in an [fzf](https://github.com/junegunn/fzf) picker: move with the arrow keys, type to narrow down, press Enter to resume the chat in its project directory. The preview shows the matching snippets. With `--print` (or when output is piped) you get grouped results instead:
+
 ```
-$ claude-search flaky build --since 2w
+$ claude-search --print flaky build --since 2w
 JpsProjectImportPerformanceTests flaky failures since September  65 hits · 2026-10-28 14:20
   ~/Projects/myapp (master)
        you Why did this test start sporadically failing in September? …
@@ -14,11 +16,11 @@ JpsProjectImportPerformanceTests flaky failures since September  65 hits · 2026
 
 Each result shows the chat title, project directory, git branch, last activity time, highlighted snippets, and the command to resume it.
 
-Run it **without search terms** to get a switcher: all your chats across projects, most recent first, in fzf with a preview of the first and last prompt. Press Enter to resume the selected chat in its project directory.
+Run it **without search terms** to get a switcher: all your chats across projects, most recent first, with a preview of the first and last prompt.
 
 ## Install
 
-Requires Python 3.9+. [fzf](https://github.com/junegunn/fzf) is optional, for the switcher and `-i` (without it, `claude-search` prints the list).
+Requires Python 3.9+. [fzf](https://github.com/junegunn/fzf) is optional: without it, results are always printed.
 
 ```sh
 curl -o ~/.local/bin/claude-search https://raw.githubusercontent.com/emrzv/claude-search/main/claude-search
@@ -29,13 +31,12 @@ chmod +x ~/.local/bin/claude-search
 
 ```sh
 claude-search                      # switcher: pick a recent chat and resume it
-claude-search --print -p myapp     # list recent chats in myapp instead of opening fzf
+claude-search -p myapp --since 7d  # only chats in projects whose path contains "myapp", active in the last 7 days
 claude-search foo bar              # chats containing both "foo" and "bar" (anywhere in the chat)
 claude-search "foo bar"            # exact phrase
 claude-search -e 'PROJ-\d+'        # regular expression
-claude-search -i docker            # pick a chat with fzf and resume it in its project directory
-claude-search -p myapp --since 7d  # only projects whose path contains "myapp", active in the last 7 days
-claude-search -n 0 gradle          # titles only, no snippets
+claude-search --print docker       # print grouped results with snippets instead of the picker
+claude-search --print -n 0 gradle  # titles only, no snippets
 claude-search --json gradle        # machine-readable output
 ```
 
@@ -51,7 +52,7 @@ By default only your prompts, Claude's replies and chat titles are searched; mat
 | `--sort hits` | most matches first (default: most recent) |
 | `-l N` | show at most N chats |
 | `-w N` | characters of context around each match |
-| `--print` | without terms: print the list instead of opening fzf |
+| `--print` | print results instead of opening the picker |
 | `--no-pager` | don't page output |
 
 See `claude-search -h` for the full list.
