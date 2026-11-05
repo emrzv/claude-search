@@ -2,7 +2,7 @@
 
 Search your local [Claude Code](https://claude.com/claude-code) sessions across **all projects** at once, with results grouped by chat. Handy when you remember a conversation but not which project you had it in.
 
-In a terminal, results open in an [fzf](https://github.com/junegunn/fzf) picker: move with the arrow keys, type to narrow down, press Enter to resume the chat in its project directory. The preview shows the matching snippets. With `--print` (or when output is piped) you get grouped results instead:
+In a terminal, results open in an [fzf](https://github.com/junegunn/fzf) picker: move with the arrow keys, type to narrow down by title or project (exact substrings; several words must all match), press Enter to resume the chat in its project directory. The preview shows the matching snippets. With `--print` (or when output is piped) you get grouped results instead:
 
 ```
 $ claude-search --print flaky build --since 2w
