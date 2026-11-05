@@ -47,10 +47,13 @@ By default only your prompts, Claude's replies and chat titles are searched; mat
 | `--sort hits` | most matches first (default: most recent) |
 | `-l N` | show at most N chats |
 | `-w N` | characters of context around each match |
+| `--no-pager` | don't page output |
 
 See `claude-search -h` for the full list.
 
-## Colors
+## Paging and colors
+
+When writing to a terminal, output goes through a pager (`$CLAUDE_SEARCH_PAGER`, `$PAGER` or `less`; `LESS=FRX` by default, like git), so the most recent chats are on screen first and short output is printed directly.
 
 The default colors work on both light and dark terminals. fzf is started with `--color light` when the terminal reports a light background via `COLORFGBG` (unless `FZF_DEFAULT_OPTS` sets colors). To customize, set any of these keys to an SGR code; `NO_COLOR` disables colors:
 

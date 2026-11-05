@@ -44,6 +44,32 @@ def light_background():
     return os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in ("7", "15")
 
 
+def page(lines):
+    """Show output through a pager (like git) when writing to a terminal."""
+    if not sys.stdout.isatty():
+        print("\n".join(lines))
+        return
+    pager = os.environ.get("CLAUDE_SEARCH_PAGER") or os.environ.get("PAGER") or "less"
+    env = dict(os.environ)
+    env.setdefault("LESS", "FRX")  # quit if one screen, keep colors, don't clear the screen
+    try:
+        proc = subprocess.Popen(pager, shell=True, stdin=subprocess.PIPE, env=env, text=True)
+    except OSError:
+        print("\n".join(lines))
+        return
+    try:
+        proc.stdin.write("\n".join(lines) + "\n")
+        proc.stdin.close()
+    except BrokenPipeError:  # user quit the pager early
+        pass
+    while True:
+        try:
+            proc.wait()
+            break
+        except KeyboardInterrupt:  # let less handle Ctrl-C itself
+            pass
+
+
 def parse_since(s):
     m = re.fullmatch(r"(\d+)([hdwm])", s)
     if m:
@@ -195,9 +221,12 @@ def main():
     ap.add_argument("-l", "--limit", type=int, default=0, help="max sessions to show")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("-i", "--interactive", action="store_true", help="pick a session with fzf and resume it")
+    ap.add_argument("--no-pager", action="store_true", help="don't page output")
     opts = ap.parse_args()
     if opts.all:
         opts.tools = True
+    if opts.no_pager:
+        os.environ["CLAUDE_SEARCH_PAGER"] = "cat"
 
     flags = re.IGNORECASE if opts.ignore_case else 0
     srcs = opts.terms if opts.regex else [re.escape(t) for t in opts.terms]
@@ -256,21 +285,26 @@ def main():
         return pick(sessions, opts)
 
     st = Style(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+    lines = []
     for s in sessions:
         when = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
         n = len(s["hits"])
-        print(f"{st.title(s['title'])}  {st.dim(f'{n} hit' + ('s' if n != 1 else '') + f' · {when}')}")
+        lines.append(f"{st.title(s['title'])}  {st.dim(f'{n} hit' + ('s' if n != 1 else '') + f' · {when}')}")
         branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
-        print(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
+        lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
         for ts, role, text, m in s["hits"][:opts.snippets]:
             label = getattr(st, role, st.dim)(f"{role:>8}")
-            print(f"  {label} {snippet(text, m, opts.width, st)}")
+            lines.append(f"  {label} {snippet(text, m, opts.width, st)}")
         if n > opts.snippets > 0:
-            print(st.dim(f"           … {n - opts.snippets} more"))
-        print(st.dim(f"  ↳ cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
-        print()
-    total = sum(len(s["hits"]) for s in sessions)
-    print(st.dim(f"{len(sessions)} session(s), {total} hit(s)"), file=sys.stderr)
+            lines.append(st.dim(f"           … {n - opts.snippets} more"))
+        lines.append(st.dim(f"  ↳ cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
+        lines.append("")
+    summary = f"{len(sessions)} session(s), {sum(len(s['hits']) for s in sessions)} hit(s)"
+    if sys.stdout.isatty():
+        page([st.dim(summary), ""] + lines)
+    else:
+        print("\n".join(lines))
+        print(summary, file=sys.stderr)
 
 
 def pick(sessions, opts):
