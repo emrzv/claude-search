@@ -66,7 +66,20 @@ def one_line(text, width=None):
 
 MAX_PATH_WIDTH = 50  # project column; longer paths keep their tail ("…/project")
 MIN_TITLE_WIDTH = 25
-WIDE_TERMINAL = 160  # below this the picker preview goes under the list, so the list gets the full width
+FZF_LIST_CHROME = 3  # columns fzf uses around list rows (pointer, marker, scrollbar)
+
+
+def fmt_cost(cost):
+    return "" if cost is None else f"${cost:,.2f}"
+
+
+def visible_len(text):
+    return len(re.sub(r"\033\[[0-9;]*m", "", text))
+
+
+def right_align(left, right, width):
+    """Pad `left` so `right` ends at column `width` (at least two spaces apart)."""
+    return f"{left}{' ' * max(2, width - visible_len(left) - visible_len(right))}{right}"
 
 
 def path_width(sessions, available):
@@ -186,7 +199,7 @@ def search_file(path, opts, patterns, literals):
     titles = {}
     hits = []  # (timestamp, role, text, match)
     matched = [False] * len(patterns)
-    meta = {"cwd": None, "branch": None, "first_prompt": None, "last_prompt": None}
+    meta = {"cwd": None, "branch": None, "first_prompt": None, "last_prompt": None, "cost": None}
     try:
         f = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -200,6 +213,12 @@ def search_file(path, opts, patterns, literals):
                         titles["ai"] = r["aiTitle"]
                     if r.get("customTitle"):
                         titles["custom"] = r["customTitle"]
+                except ValueError:
+                    pass
+                continue
+            if '"type":"cost-state"' in line:  # cumulative, so the last one is the session total
+                try:
+                    meta["cost"] = json.loads(line).get("totalCostUSD", meta["cost"])
                 except ValueError:
                     pass
                 continue
@@ -255,6 +274,7 @@ def search_file(path, opts, patterns, literals):
         "branch": meta["branch"],
         "first_prompt": meta["first_prompt"],
         "last_prompt": meta["last_prompt"],
+        "cost": meta["cost"],
         "mtime": last_activity(path),
         "hits": hits,
     }
@@ -322,7 +342,8 @@ def main():
             prev["hits"] += s["hits"]
             prev["mtime"] = max(prev["mtime"], s["mtime"])
             if prev["subagent"] and not s["subagent"]:
-                prev.update({k: s[k] for k in ("title", "cwd", "branch", "file", "first_prompt", "last_prompt")}, subagent=False)
+                prev.update({k: s[k] for k in ("title", "cwd", "branch", "file", "first_prompt", "last_prompt", "cost")},
+                            subagent=False)
         else:
             results[s["id"]] = s
 
@@ -333,6 +354,7 @@ def main():
     if opts.json:
         out = [{k: v for k, v in s.items() if k not in ("hits", "mtime")} | {
             "last_active": datetime.fromtimestamp(s["mtime"]).astimezone().isoformat(timespec="seconds"),
+            "cost_usd": s["cost"],
             "resume": f"cd {s['cwd']!r} && claude --resume {s['id']}",
         } | ({} if recent_mode else {
             "hit_count": len(s["hits"]),
@@ -349,15 +371,18 @@ def main():
     paging = sys.stdout.isatty()
     lines = []
     if recent_mode:
-        pw = path_width(sessions, shutil.get_terminal_size().columns)
+        cols = shutil.get_terminal_size().columns
+        pw = path_width(sessions, cols)
+        cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
+        tw = max(MIN_TITLE_WIDTH, cols - 18 - pw - 2 - cw - 2 - 36)  # 36 = session id
         for s in sessions:
-            lines.append(f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  "
-                         f"{st.title(s['title'])}  {st.dim(s['id'])}")
+            left = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {st.title(one_line(s['title'], tw))}"
+            lines.append(right_align(left, f"{fmt_cost(s['cost']).rjust(cw)}  {st.dim(s['id'])}", cols))
         summary = f"{len(sessions)} session(s)"
     else:
         for s in sessions:
             n = len(s["hits"])
-            info = f"{n} hit{'s' if n != 1 else ''} · {fmt_time(s['mtime'])}"
+            info = f"{n} hit{'s' if n != 1 else ''} · {fmt_time(s['mtime'])}" + (f" · {fmt_cost(s['cost'])}" if s["cost"] is not None else "")
             lines.append(f"{st.title(s['title'])}  {st.dim(info)}")
             branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
             lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
@@ -382,9 +407,10 @@ def pick(sessions, opts, recent_mode):
     if not shutil.which("fzf"):
         sys.exit("fzf not found; install it or use --print")
     st = Style(not os.environ.get("NO_COLOR"))
-    cols = shutil.get_terminal_size().columns
-    list_width = cols * 55 // 100 if cols >= WIDE_TERMINAL else cols
-    pw = path_width(sessions, list_width - 3 - (0 if recent_mode else 6))  # fzf pointer/margin, "(hits)"
+    list_width = shutil.get_terminal_size().columns  # preview sits below, so the list gets the full width
+    cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
+    row_width = list_width - FZF_LIST_CHROME
+    pw = path_width(sessions, row_width - (cw + 2) - (0 if recent_mode else 6))  # "(hits)"
     # Make kill / closing the terminal unwind through `finally`, so the preview dir is removed.
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
@@ -409,16 +435,20 @@ def pick(sessions, opts, recent_mode):
             preview.append(st.dim(f"cd {short_path(s['cwd'])} && claude --resume {s['id']}"))
             Path(tmp, str(idx)).write_text("\n".join(preview) + "\n", encoding="utf-8")
             hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
-            row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {s['title']}{hits}"
-            lines.append(f"{idx}\t{row}")
+            row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  "
+            row += one_line(s["title"], max(10, row_width - visible_len(row) - visible_len(hits) - cw - 2)) + hits
+            # Cost is a separate field pinned with --freeze-right, so a long title is truncated instead.
+            cost = fmt_cost(s["cost"]).rjust(cw)
+            lines.append(f"{idx}\t{row}{' ' * max(1, row_width - visible_len(row) - len(cost) - 1)}\t{cost}")
         n = len(sessions)
         what = "recent chats" if recent_mode else \
             f"{n} chat{'s' if n != 1 else ''} matching " + " ".join(shlex.quote(t) for t in opts.terms)
         header = f"{what} · type to filter · Enter: resume · Esc: quit"
         # --exact: the filter matches substrings; fuzzy matching hits most titles for any word
-        cmd = ["fzf", "--ansi", "--exact", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
+        cmd = ["fzf", "--ansi", "--exact", "--delimiter", "\t", "--with-nth", "2,3", "--freeze-right", "1", "--tabstop", "1",
+               "--no-sort", "--layout", "reverse",
                "--prompt", "Filter: ", "--header", header,
-               "--preview-window", f"right,45%,wrap,<{WIDE_TERMINAL}(down,40%,wrap)",
+               "--preview-window", "down,40%,wrap",
                "--preview", f"cat {shlex.quote(tmp)}/{{1}}"]
         if light_background() and "--color" not in os.environ.get("FZF_DEFAULT_OPTS", ""):
             cmd += ["--color", "light"]
