@@ -371,10 +371,15 @@ def main():
     paging = sys.stdout.isatty()
     lines = []
     if recent_mode:
-        cols = shutil.get_terminal_size().columns
-        pw = path_width(sessions, cols)
         cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
-        tw = max(MIN_TITLE_WIDTH, cols - 18 - pw - 2 - cw - 2 - 36)  # 36 = session id
+        if sys.stdout.isatty():
+            cols = shutil.get_terminal_size().columns
+            pw = path_width(sessions, cols)
+            tw = max(MIN_TITLE_WIDTH, cols - 18 - pw - 2 - cw - 2 - 36)  # 36 = session id
+        else:  # piped: keep full paths and titles, just align the columns
+            pw = max((len(short_path(s["cwd"])) for s in sessions), default=0)
+            tw = max((len(one_line(s["title"])) for s in sessions), default=0)
+            cols = 18 + pw + 2 + tw + 2 + cw + 2 + 36
         for s in sessions:
             left = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {st.title(one_line(s['title'], tw))}"
             lines.append(right_align(left, f"{fmt_cost(s['cost']).rjust(cw)}  {st.dim(s['id'])}", cols))
