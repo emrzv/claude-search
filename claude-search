@@ -73,6 +73,21 @@ def fmt_cost(cost):
     return "" if cost is None else f"${cost:,.2f}"
 
 
+def model_name(model_id):
+    """claude-opus-5-5 -> Opus 5.5, claude-haiku-4-5-20251001 -> Haiku 4.5"""
+    m = re.fullmatch(r"claude-([a-z]+)((?:-\d{1,2})*)(?:-\d{8})?", model_id or "")
+    if not m:
+        return model_id or ""
+    return f"{m[1].capitalize()} {m[2][1:].replace('-', '.')}".strip()
+
+
+def stats_column(sessions):
+    """Right-hand column: model used last and session cost, aligned across rows."""
+    mw = max((len(model_name(s["model"])) for s in sessions), default=0)
+    cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
+    return lambda s: f"{model_name(s['model']).ljust(mw)}  {fmt_cost(s['cost']).rjust(cw)}", mw + 2 + cw
+
+
 def visible_len(text):
     return len(re.sub(r"\033\[[0-9;]*m", "", text))
 
@@ -200,6 +215,7 @@ def search_file(path, opts, patterns, literals):
     hits = []  # (timestamp, role, text, match)
     matched = [False] * len(patterns)
     meta = {"cwd": None, "branch": None, "first_prompt": None, "last_prompt": None, "cost": None}
+    models = []  # in order of first use; the last element is the model used most recently
     try:
         f = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -216,6 +232,14 @@ def search_file(path, opts, patterns, literals):
                 except ValueError:
                     pass
                 continue
+            i = line.find('"message":{"model":"')
+            if i >= 0:
+                i += 20
+                model = line[i:line.find('"', i)]
+                if model.startswith("claude-") and (not models or models[-1] != model):
+                    if model in models:
+                        models.remove(model)
+                    models.append(model)
             if '"type":"cost-state"' in line:  # cumulative, so the last one is the session total
                 try:
                     meta["cost"] = json.loads(line).get("totalCostUSD", meta["cost"])
@@ -275,6 +299,8 @@ def search_file(path, opts, patterns, literals):
         "first_prompt": meta["first_prompt"],
         "last_prompt": meta["last_prompt"],
         "cost": meta["cost"],
+        "model": models[-1] if models else None,
+        "models": models,
         "mtime": last_activity(path),
         "hits": hits,
     }
@@ -342,7 +368,8 @@ def main():
             prev["hits"] += s["hits"]
             prev["mtime"] = max(prev["mtime"], s["mtime"])
             if prev["subagent"] and not s["subagent"]:
-                prev.update({k: s[k] for k in ("title", "cwd", "branch", "file", "first_prompt", "last_prompt", "cost")},
+                prev.update({k: s[k] for k in ("title", "cwd", "branch", "file", "first_prompt", "last_prompt", "cost",
+                                                       "model", "models")},
                             subagent=False)
         else:
             results[s["id"]] = s
@@ -355,6 +382,8 @@ def main():
         out = [{k: v for k, v in s.items() if k not in ("hits", "mtime")} | {
             "last_active": datetime.fromtimestamp(s["mtime"]).astimezone().isoformat(timespec="seconds"),
             "cost_usd": s["cost"],
+            "model": s["model"],
+            "models": s["models"],
             "resume": f"cd {s['cwd']!r} && claude --resume {s['id']}",
         } | ({} if recent_mode else {
             "hit_count": len(s["hits"]),
@@ -371,7 +400,7 @@ def main():
     paging = sys.stdout.isatty()
     lines = []
     if recent_mode:
-        cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
+        stats, cw = stats_column(sessions)
         if sys.stdout.isatty():
             cols = shutil.get_terminal_size().columns
             pw = path_width(sessions, cols)
@@ -382,12 +411,13 @@ def main():
             cols = 18 + pw + 2 + tw + 2 + cw + 2 + 36
         for s in sessions:
             left = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  {st.title(one_line(s['title'], tw))}"
-            lines.append(right_align(left, f"{fmt_cost(s['cost']).rjust(cw)}  {st.dim(s['id'])}", cols))
+            lines.append(right_align(left, f"{stats(s)}  {st.dim(s['id'])}", cols))
         summary = f"{len(sessions)} session(s)"
     else:
         for s in sessions:
             n = len(s["hits"])
-            info = f"{n} hit{'s' if n != 1 else ''} · {fmt_time(s['mtime'])}" + (f" · {fmt_cost(s['cost'])}" if s["cost"] is not None else "")
+            info = " · ".join(x for x in (f"{n} hit{'s' if n != 1 else ''}", fmt_time(s["mtime"]),
+                                          model_name(s["model"]), fmt_cost(s["cost"])) if x)
             lines.append(f"{st.title(s['title'])}  {st.dim(info)}")
             branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
             lines.append(f"  {st.path(short_path(s['cwd']))}{st.dim(branch)}")
@@ -413,7 +443,7 @@ def pick(sessions, opts, recent_mode):
         sys.exit("fzf not found; install it or use --print")
     st = Style(not os.environ.get("NO_COLOR"))
     list_width = shutil.get_terminal_size().columns  # preview sits below, so the list gets the full width
-    cw = max((len(fmt_cost(s["cost"])) for s in sessions), default=0)
+    stats, cw = stats_column(sessions)
     row_width = list_width - FZF_LIST_CHROME
     pw = path_width(sessions, row_width - (cw + 2) - (0 if recent_mode else 6))  # "(hits)"
     # Make kill / closing the terminal unwind through `finally`, so the preview dir is removed.
@@ -426,7 +456,11 @@ def pick(sessions, opts, recent_mode):
         for idx, s in enumerate(sessions):
             branch = f" ({s['branch']})" if s["branch"] and s["branch"] != "HEAD" else ""
             preview = [st.title(s["title"]), st.path(short_path(s["cwd"])) + st.dim(branch),
-                       st.dim(f"last active {fmt_time(s['mtime'])}"), ""]
+                       st.dim(f"last active {fmt_time(s['mtime'])}")]
+            if s["models"]:
+                preview.append(st.dim("model" + ("s" if len(s["models"]) > 1 else "") + ": " +
+                                      " → ".join(model_name(m) for m in s["models"])))
+            preview.append("")
             if recent_mode:
                 preview += [st.you("First prompt:"), one_line(s["first_prompt"], 600), ""]
                 if s["last_prompt"] and one_line(s["last_prompt"]) != one_line(s["first_prompt"]):
@@ -442,9 +476,9 @@ def pick(sessions, opts, recent_mode):
             hits = "" if recent_mode else "  " + st.dim(f"({len(s['hits'])})")
             row = f"{st.dim(fmt_time(s['mtime']))}  {st.path(clip_path(s['cwd'], pw).ljust(pw))}  "
             row += one_line(s["title"], max(10, row_width - visible_len(row) - visible_len(hits) - cw - 2)) + hits
-            # Cost is a separate field pinned with --freeze-right, so a long title is truncated instead.
-            cost = fmt_cost(s["cost"]).rjust(cw)
-            lines.append(f"{idx}\t{row}{' ' * max(1, row_width - visible_len(row) - len(cost) - 1)}\t{cost}")
+            # Model/cost is a separate field pinned with --freeze-right, so a long title is truncated instead.
+            right = stats(s)
+            lines.append(f"{idx}\t{row}{' ' * max(1, row_width - visible_len(row) - len(right) - 1)}\t{right}")
         n = len(sessions)
         what = "recent chats" if recent_mode else \
             f"{n} chat{'s' if n != 1 else ''} matching " + " ".join(shlex.quote(t) for t in opts.terms)

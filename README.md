@@ -14,7 +14,7 @@ JpsProjectImportPerformanceTests flaky failures since September  65 hits · 2026
   ↳ cd ~/Projects/myapp && claude --resume c9eb91b7-…
 ```
 
-Each result shows the chat title, project directory, git branch, last activity time, cost, highlighted snippets, and the command to resume it. The cost is the session total Claude Code records locally; it's left blank for sessions without one (older ones or ones still open).
+Each result shows the chat title, project directory, git branch, last activity time, model, cost, highlighted snippets, and the command to resume it. The model is the one used most recently (the preview lists all of them if the chat switched models). The cost is the session total Claude Code records locally; it's left blank for sessions without one (older ones or ones still open).
 
 Run it **without search terms** to get a switcher: all your chats across projects, most recent first, with a preview of the first and last prompt.
 
